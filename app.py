@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import gspread
 import urllib3
+from urllib.parse import urlparse
 from google.oauth2.service_account import Credentials
 from gspread import Cell
 
@@ -12,10 +13,10 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
-# YOUR spreadsheet ID – only here, not shown to the user
+# Your spreadsheet ID – stored only in code, not visible to users
 SPREADSHEET_ID = "1b3XnnXIoGMaQz2V0ADYii83GkxRVgmZ0B1wgGYT2UyY"
 
-URL_COLUMN_NAME = "Source"          # URL column name
+URL_COLUMN_NAME = "Source"            # URL column name
 STATUS_COLUMN_NAME = "Response code"  # HTTP status column name
 
 
@@ -63,34 +64,76 @@ def ensure_status_column(ws, headers_row):
 
 # ====== HTTP CHECK LOGIC ======
 
-def check_url_status(url: str) -> str:
+def normalize_url(url: str) -> str:
     """
-    Return HTTP status code as string.
-    If the request fails – return 'Site Not Found'.
-
-    SSL certificate errors are ignored (verify=False),
-    just like `allowUnauthorizedCerts: true` in n8n.
+    Normalize URL:
+    - trim spaces
+    - if scheme is missing, default to http://
+    - if starts with //domain, also add http://
     """
     if not url:
         return ""
 
+    url = url.strip()
+
+    # //example.com/path -> http://example.com/path
+    if url.startswith("//"):
+        return "http:" + url
+
+    parsed = urlparse(url)
+
+    if not parsed.scheme:
+        # no scheme at all -> assume http
+        return "http://" + url
+
+    return url
+
+
+def _do_request(url: str) -> str:
+    """
+    Single HTTP request with our common options.
+    Returns status code as string.
+    """
+    resp = requests.get(
+        url,
+        allow_redirects=True,
+        timeout=10,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+        },
+        verify=False,  # ignore invalid / self-signed SSL certs
+    )
+    return str(resp.status_code)
+
+
+def check_url_status(url: str) -> str:
+    """
+    Try:
+    1) given URL (normalized)
+    2) if it was https:// and raised an error –
+       retry with http:// (no SSL).
+    """
+    url = normalize_url(url)
+    if not url:
+        return ""
+
+    # 1st attempt — as is
     try:
-        resp = requests.get(
-            url,
-            allow_redirects=True,
-            timeout=10,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                )
-            },
-            verify=False,  # <--- ignore invalid / self-signed SSL certs
-        )
-        return str(resp.status_code)
+        return _do_request(url)
     except Exception:
-        return "Site Not Found"
+        # If original URL was https:// – try http://
+        if url.startswith("https://"):
+            http_url = "http://" + url[len("https://"):]
+            try:
+                return _do_request(http_url)
+            except Exception:
+                return "Site Not Found"
+        else:
+            return "Site Not Found"
 
 
 # ====== SHEETS PROCESSING ======

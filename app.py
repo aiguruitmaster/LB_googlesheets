@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import gspread
 import urllib3
+import pandas as pd
 from urllib.parse import urlparse
 from google.oauth2.service_account import Credentials
 from gspread import Cell
@@ -216,15 +217,20 @@ def process_sheets(sheet_names, progress, status_placeholder):
     - for each row with a URL make HTTP request
     - write status code into the 'Response code' column
     - update Streamlit progress
+
+    Returns:
+      summary: per-sheet stats
+      detailed_results: list of {sheet, row, url, status}
     """
     sheets_data, total_urls = preload_sheets_data(SPREADSHEET_ID, sheet_names)
 
     if total_urls == 0:
         st.warning("No URLs found in 'Source' column on selected sheets.")
-        return []
+        return [], []
 
     processed = 0
     results_summary = []
+    detailed_results = []
 
     for sheet_name in sheet_names:
         data = sheets_data[sheet_name]
@@ -276,6 +282,16 @@ def process_sheets(sheet_names, progress, status_placeholder):
 
             cells_to_update.append(Cell(row=row_idx, col=status_col, value=status))
 
+            # Save detailed info
+            detailed_results.append(
+                {
+                    "sheet": sheet_name,
+                    "row": row_idx,
+                    "url": url,
+                    "status": status,
+                }
+            )
+
             # Update progress & status text
             progress.progress(processed / total_urls)
             status_placeholder.write(
@@ -295,7 +311,7 @@ def process_sheets(sheet_names, progress, status_placeholder):
             }
         )
 
-    return results_summary
+    return results_summary, detailed_results
 
 
 # ====== STREAMLIT UI ======
@@ -333,18 +349,15 @@ def main():
 
     if not selected_sheets:
         st.info("Please select at least one sheet to process.")
-        st.stop()
-
-    st.markdown("### 2. Run URL check")
-
+        # Still may want to show previous results if they exist
     run_button = st.button("🚀 Run check")
 
-    if run_button:
+    if run_button and selected_sheets:
         progress = st.progress(0)
         status_placeholder = st.empty()
 
         with st.spinner("Processing URLs..."):
-            summary = process_sheets(
+            summary, details = process_sheets(
                 sheet_names=selected_sheets,
                 progress=progress,
                 status_placeholder=status_placeholder,
@@ -352,14 +365,43 @@ def main():
 
         st.success("Processing finished ✅")
 
-        # Summary
-        st.markdown("### 3. Summary")
+        # Save results in session_state so filters work without re-processing
+        st.session_state["last_summary"] = summary
+        st.session_state["last_details"] = details
+
+    # ====== SHOW RESULTS (if any) ======
+    if "last_summary" in st.session_state:
+        summary = st.session_state["last_summary"]
+        details = st.session_state["last_details"]
+
+        st.markdown("### 2. Summary")
 
         total_urls = sum(item["total_urls"] for item in summary)
         total_processed = sum(item["processed_urls"] for item in summary)
 
         st.write(f"Total URLs found: **{total_urls}**, processed: **{total_processed}**")
         st.table(summary)
+
+        # Detailed results + filter
+        st.markdown("### 3. Detailed results")
+
+        if details:
+            status_values = sorted(set(item["status"] for item in details))
+            selected_statuses = st.multiselect(
+                "Filter by status code",
+                options=status_values,
+                default=status_values,
+            )
+
+            filtered = [r for r in details if r["status"] in selected_statuses]
+
+            if filtered:
+                df = pd.DataFrame(filtered)[["sheet", "row", "url", "status"]]
+                st.dataframe(df, use_container_width=True)
+            else:
+                st.info("No rows match the selected status codes.")
+        else:
+            st.info("No detailed results available yet.")
 
 
 if __name__ == "__main__":
